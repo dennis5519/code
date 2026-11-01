@@ -1,3 +1,4 @@
+import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -92,6 +93,44 @@ class BrowserRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(code, "P2GGWZAM")
         client.forum_page.goto.assert_awaited_once()
+
+    async def test_installs_chromium_when_playwright_executable_is_missing(self):
+        client = ShuffleBot()
+        executable_path = Path("missing-chromium")
+        runtime = SimpleNamespace(chromium=SimpleNamespace(executable_path=str(executable_path)))
+        process = SimpleNamespace(wait=AsyncMock(return_value=0))
+
+        with patch("bot.asyncio.create_subprocess_exec", new_callable=AsyncMock) as install:
+            install.return_value = process
+            with patch.object(Path, "is_file", side_effect=[False, True]):
+                client.forum_browser_runtime = runtime
+                await client._ensure_chromium_installed()
+
+        install.assert_awaited_once_with(
+            sys.executable,
+            "-m",
+            "playwright",
+            "install",
+            "chromium",
+        )
+
+    async def test_server_browser_launches_headless(self):
+        client = ShuffleBot()
+        browser = SimpleNamespace(
+            is_connected=Mock(return_value=True),
+            new_context=AsyncMock(return_value=SimpleNamespace(new_page=AsyncMock())),
+        )
+        runtime = SimpleNamespace(chromium=SimpleNamespace(executable_path="installed"))
+        client.forum_browser_runtime = runtime
+        client.forum_browser = None
+
+        with patch.object(ShuffleBot, "_ensure_chromium_installed", new_callable=AsyncMock):
+            runtime.chromium.launch = AsyncMock(return_value=browser)
+            with patch.object(ShuffleBot, "_guard_forum_navigation", new_callable=AsyncMock):
+                with patch("bot.sys.platform", "linux"):
+                    await client._ensure_forum_browser()
+
+        runtime.chromium.launch.assert_awaited_once_with(headless=True)
 
 
 class PresenceTests(unittest.IsolatedAsyncioTestCase):

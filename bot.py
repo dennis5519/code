@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -768,15 +769,39 @@ class ShuffleBot(commands.Bot):
                 )
             except PlaywrightError as error:
                 log.warning("커뮤니티 브라우저 조회 실패: %s", error)
+            except RuntimeError as error:
+                log.warning("커뮤니티 Chromium 준비 실패: %s", error)
             return None
+
+    async def _ensure_chromium_installed(self) -> None:
+        executable_path = Path(self.forum_browser_runtime.chromium.executable_path)
+        if executable_path.is_file():
+            return
+
+        log.info("Playwright Chromium이 없어 설치를 시작합니다.")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "playwright",
+            "install",
+            "chromium",
+        )
+        return_code = await process.wait()
+        if return_code != 0:
+            raise RuntimeError(f"Playwright Chromium 설치 명령이 종료 코드 {return_code}를 반환했습니다.")
+        if not executable_path.is_file():
+            raise RuntimeError(f"설치 후 Chromium 실행 파일을 찾을 수 없습니다: {executable_path}")
 
     async def _ensure_forum_browser(self) -> None:
         if self.forum_page and not self.forum_page.is_closed():
             return
         if self.forum_browser_runtime is None:
             self.forum_browser_runtime = await async_playwright().start()
+        await self._ensure_chromium_installed()
         if self.forum_browser is None or not self.forum_browser.is_connected():
-            self.forum_browser = await self.forum_browser_runtime.chromium.launch(headless=False)
+            self.forum_browser = await self.forum_browser_runtime.chromium.launch(
+                headless=sys.platform.startswith("linux")
+            )
             self.forum_browser_context = await self.forum_browser.new_context()
         self.forum_page = await self.forum_browser_context.new_page()
         await self.forum_page.route("**/*", self._guard_forum_navigation)
