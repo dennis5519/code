@@ -12,6 +12,7 @@ from bot import (
     Database,
     POLL_INTERVAL_SECONDS,
     ShuffleBot,
+    bot as discord_bot,
     calculate_backoff_seconds,
     extract_landing_page_code,
     on_ready as bot_on_ready,
@@ -103,6 +104,36 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(activity, discord.Streaming)
         self.assertEqual(activity.name, "> yubin12 코드로 방송중 <")
         self.assertEqual(activity.url, "https://www.twitch.tv/yubin12")
+
+
+class SlashCommandTests(unittest.TestCase):
+    def test_all_commands_are_registered_in_the_application_command_tree(self):
+        names = {command.name for command in discord_bot.tree.get_commands()}
+
+        self.assertEqual(
+            names,
+            {
+                "도움말",
+                "채널설정",
+                "패널",
+                "알림역할",
+                "기록",
+                "기록동기화",
+                "상태",
+                "일시정지",
+                "재개",
+                "테스트",
+            },
+        )
+        self.assertEqual(discord_bot.commands, set())
+
+    def test_role_command_exposes_role_and_create_options(self):
+        command = discord_bot.tree.get_command("알림역할")
+
+        self.assertEqual(
+            {parameter.name for parameter in command.parameters},
+            {"role", "create"},
+        )
 
 
 class ReliabilityTests(unittest.IsolatedAsyncioTestCase):

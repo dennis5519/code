@@ -631,8 +631,7 @@ class RecordPager(discord.ui.View):
 class ShuffleBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True
-        super().__init__(command_prefix="!", intents=intents, help_command=None)
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents, help_command=None)
         self.database: Database | None = None
         self.session: aiohttp.ClientSession | None = None
         self.consecutive_failures = 0
@@ -671,6 +670,8 @@ class ShuffleBot(commands.Bot):
                 {"id": 0, "code": "TEST2026", "posted_at": datetime.now(timezone.utc)},
             )
         )
+        synced_commands = await self.tree.sync()
+        log.info("슬래시 명령어 %s개를 Discord에 등록했습니다.", len(synced_commands))
         self.poll.change_interval(seconds=POLL_INTERVAL_SECONDS)
         self.poll.start()
 
@@ -939,7 +940,7 @@ class ShuffleBot(commands.Bot):
     async def send_code(self, post: dict) -> None:
         channel_id = self.database.get_setting("drop_channel_id")
         if not channel_id:
-            raise RuntimeError("드랍 채널이 설정되지 않았습니다. 관리자: !채널설정")
+            raise RuntimeError("드랍 채널이 설정되지 않았습니다. 관리자: /채널설정")
         channel = self.get_channel(int(channel_id))
         if channel is None:
             channel = await self.fetch_channel(int(channel_id))
@@ -1072,15 +1073,18 @@ class ShuffleBot(commands.Bot):
         await self.wait_until_ready()
         await self.bootstrap()
 
-    async def is_admin(self, ctx: commands.Context) -> bool:
-        if ctx.author.id in ADMIN_IDS:
+    async def is_admin(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id in ADMIN_IDS:
             return True
-        return isinstance(ctx.author, discord.Member) and ctx.author.guild_permissions.administrator
+        return (
+            isinstance(interaction.user, discord.Member)
+            and interaction.user.guild_permissions.administrator
+        )
 
-    async def require_admin(self, ctx: commands.Context) -> bool:
-        if await self.is_admin(ctx):
+    async def require_admin(self, interaction: discord.Interaction) -> bool:
+        if await self.is_admin(interaction):
             return True
-        await ctx.reply("관리자만 사용할 수 있습니다.", mention_author=False)
+        await interaction.response.send_message("관리자만 사용할 수 있습니다.", ephemeral=True)
         return False
 
 
@@ -1098,135 +1102,177 @@ async def on_ready():
     log.info("Discord 연결 완료: %s (%s)", bot.user, bot.user.id if bot.user else "unknown")
 
 
-@bot.command(name="도움말")
-async def help_command(ctx: commands.Context):
-    if not await bot.require_admin(ctx):
+@bot.tree.command(name="도움말", description="봇 명령어와 사용 방법을 확인합니다.")
+async def help_command(interaction: discord.Interaction):
+    if not await bot.require_admin(interaction):
         return
-    await ctx.reply(
+    await interaction.response.send_message(
         "**ShuffleBoost 코드 봇 명령어**\n"
-        "`!도움말` 명령어 안내\n"
-        "`!채널설정` 현재 채널을 코드 드랍 채널로 지정\n"
-        "`!알림역할 @역할` 또는 `!알림역할 생성`\n"
-        "`!패널` 고정 코드 패널을 최신 저장 코드로 갱신\n"
-        "`!기록 [개수]` 최근 코드 조회 (최대 50개)\n"
-        "`!기록동기화 [페이지수]` Telegram 과거 기록 백필\n"
-        "`!상태` 봇 상태 확인\n"
-        "`!일시정지` / `!재개` 코드 드랍 제어\n"
-        "`!테스트` 테스트 임베드 전송",
-        mention_author=False,
+        "`/도움말` 명령어 안내\n"
+        "`/채널설정` 현재 채널을 코드 드랍 채널로 지정\n"
+        "`/알림역할 역할:@역할` 또는 `/알림역할 생성:true`\n"
+        "`/패널` 고정 코드 패널을 최신 저장 코드로 갱신\n"
+        "`/기록 개수:10` 최근 코드 조회 (최대 50개)\n"
+        "`/기록동기화 페이지수:10` Telegram 과거 기록 백필\n"
+        "`/상태` 봇 상태 확인\n"
+        "`/일시정지` / `/재개` 코드 드랍 제어\n"
+        "`/테스트` 테스트 임베드 전송",
+        ephemeral=True,
     )
 
 
-@bot.command(name="채널설정")
-async def set_channel(ctx: commands.Context):
-    if not await bot.require_admin(ctx):
+@bot.tree.command(name="채널설정", description="현재 서버 채널을 코드 드랍 채널로 지정합니다.")
+async def set_channel(interaction: discord.Interaction):
+    if not await bot.require_admin(interaction):
         return
-    bot.database.set_setting("drop_channel_id", ctx.channel.id)
-    await ctx.reply(f"이 채널을 코드 드랍 채널로 설정했습니다. ({ctx.channel.mention})", mention_author=False)
+    if interaction.guild is None or interaction.channel is None:
+        await interaction.response.send_message("서버 채널에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+    bot.database.set_setting("drop_channel_id", interaction.channel.id)
+    await interaction.response.send_message(
+        f"이 채널을 코드 드랍 채널로 설정했습니다. ({interaction.channel.mention})",
+        ephemeral=True,
+    )
 
 
-@bot.command(name="패널")
-async def post_latest_panel(ctx: commands.Context):
-    if not await bot.require_admin(ctx):
+@bot.tree.command(name="패널", description="저장된 최신 코드로 고정 패널을 갱신합니다.")
+async def post_latest_panel(interaction: discord.Interaction):
+    if not await bot.require_admin(interaction):
         return
     rows = bot.database.latest_codes(1)
     if not rows:
-        await ctx.reply("저장된 코드가 없습니다. `!기록동기화`로 과거 기록을 먼저 가져와 주세요.", mention_author=False)
+        await interaction.response.send_message(
+            "저장된 코드가 없습니다. `/기록동기화`로 과거 기록을 먼저 가져와 주세요.",
+            ephemeral=True,
+        )
+        return
+    if interaction.guild is None or interaction.channel is None:
+        await interaction.response.send_message("서버 채널에서만 사용할 수 있습니다.", ephemeral=True)
         return
     post = dict(rows[0])
     post["id"] = post["post_id"]
     channel_id = bot.database.get_setting("drop_channel_id")
-    channel = ctx.channel
-    if channel_id and ctx.channel.id != int(channel_id):
+    channel = interaction.channel
+    if channel_id and interaction.channel.id != int(channel_id):
         channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
     role_id = bot.database.get_setting("alert_role_id")
     role = channel.guild.get_role(int(role_id)) if role_id and getattr(channel, "guild", None) else None
     await bot.update_panel_message(channel, post, role)
-    await ctx.reply(f"고정 코드 패널을 최신 코드로 갱신했습니다. ({channel.mention})", mention_author=False)
+    await interaction.response.send_message(
+        f"고정 코드 패널을 최신 코드로 갱신했습니다. ({channel.mention})",
+        ephemeral=True,
+    )
 
 
-@bot.command(name="알림역할")
-async def set_alert_role(ctx: commands.Context, *, role_argument: str = ""):
-    if not await bot.require_admin(ctx):
+@bot.tree.command(name="알림역할", description="코드 알림 역할을 설정하거나 생성합니다.")
+@discord.app_commands.describe(
+    role="사용할 기존 알림 역할",
+    create="코드알림 역할을 새로 생성합니다.",
+)
+async def set_alert_role(
+    interaction: discord.Interaction,
+    role: discord.Role | None = None,
+    create: bool = False,
+):
+    if not await bot.require_admin(interaction):
         return
-    argument = role_argument.strip()
-    if argument == "생성":
-        if not ctx.guild:
-            await ctx.reply("서버에서만 사용할 수 있습니다.", mention_author=False)
-            return
-        role = discord.utils.get(ctx.guild.roles, name="코드알림")
+    if interaction.guild is None:
+        await interaction.response.send_message("서버에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+    if create:
+        role = discord.utils.get(interaction.guild.roles, name="코드알림")
         if role is None:
             try:
-                role = await ctx.guild.create_role(name="코드알림", reason="코드 알림 역할 생성")
+                role = await interaction.guild.create_role(
+                    name="코드알림",
+                    reason="코드 알림 역할 생성",
+                )
             except discord.Forbidden:
-                await ctx.reply("역할을 만들 권한이 없습니다.", mention_author=False)
+                await interaction.response.send_message(
+                    "역할을 만들 권한이 없습니다.",
+                    ephemeral=True,
+                )
                 return
-    else:
-        try:
-            role = await commands.RoleConverter().convert(ctx, argument)
-        except (commands.BadArgument, discord.Forbidden):
-            await ctx.reply("역할을 찾을 수 없습니다. `!알림역할 @역할` 또는 `!알림역할 생성`을 사용하세요.", mention_author=False)
-            return
+    elif role is None:
+        await interaction.response.send_message(
+            "기존 역할을 지정하거나 `생성:true`를 선택해 주세요.",
+            ephemeral=True,
+        )
+        return
     bot.database.set_setting("alert_role_id", role.id)
-    await ctx.reply(f"알림 역할을 {role.mention}으로 설정했습니다.", mention_author=False)
+    await interaction.response.send_message(
+        f"알림 역할을 {role.mention}으로 설정했습니다.",
+        ephemeral=True,
+    )
 
 
-@bot.command(name="기록")
-async def show_records(ctx: commands.Context, count: int = 10):
-    if not await bot.require_admin(ctx):
+@bot.tree.command(name="기록", description="저장된 보너스 코드 기록을 확인합니다.")
+@discord.app_commands.describe(count="한 페이지에 표시할 코드 개수 (1~50)")
+async def show_records(interaction: discord.Interaction, count: int = 10):
+    if not await bot.require_admin(interaction):
         return
     page_size = min(max(count, 1), 50)
     rows = bot.database.latest_codes(50)
     view = RecordPager(bot, rows, 0, page_size)
-    await ctx.reply(embed=view.make_embed(), view=view, mention_author=False)
+    await interaction.response.send_message(embed=view.make_embed(), view=view, ephemeral=True)
 
 
-@bot.command(name="기록동기화")
-async def sync_records(ctx: commands.Context, pages: int = BACKFILL_MAX_PAGES):
-    if not await bot.require_admin(ctx):
+@bot.tree.command(name="기록동기화", description="Telegram의 과거 게시물을 드랍 없이 기록에 가져옵니다.")
+@discord.app_commands.describe(pages="확인할 과거 페이지 수 (1~100)")
+async def sync_records(interaction: discord.Interaction, pages: int = BACKFILL_MAX_PAGES):
+    if not await bot.require_admin(interaction):
         return
     pages = min(max(pages, 1), 100)
-    await ctx.reply(f"최대 {pages}페이지의 과거 글을 확인합니다.", mention_author=False)
+    await interaction.response.send_message(
+        f"최대 {pages}페이지의 과거 글을 확인합니다.",
+        ephemeral=True,
+    )
     saved = await bot.backfill(pages)
-    await ctx.send(f"기록 동기화 완료: 코드 {saved}개를 저장했습니다. 새 코드는 드랍하지 않았습니다.")
+    await interaction.followup.send(
+        f"기록 동기화 완료: 코드 {saved}개를 저장했습니다. 새 코드는 드랍하지 않았습니다.",
+        ephemeral=True,
+    )
 
 
-@bot.command(name="상태")
-async def show_status(ctx: commands.Context):
-    if not await bot.require_admin(ctx):
+@bot.tree.command(name="상태", description="봇의 조회 및 드랍 상태를 확인합니다.")
+async def show_status(interaction: discord.Interaction):
+    if not await bot.require_admin(interaction):
         return
     last_checked = bot.last_checked.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S KST") if bot.last_checked else "아직 조회 전"
     last_post = bot.database.get_setting("last_post_id") or "없음"
     channel_id = bot.database.get_setting("drop_channel_id") or "미설정"
-    await ctx.reply(
+    await interaction.response.send_message(
         f"마지막 조회: {last_checked}\n마지막 글 번호: {last_post}\n저장된 코드: {bot.database.code_count()}개\n"
         f"연속 실패: {bot.consecutive_failures}회\n일시정지: {'예' if bot.paused else '아니오'}\n"
         f"폴링 간격: {bot.current_poll_interval}초\n드랍 채널 ID: {channel_id}",
-        mention_author=False,
+        ephemeral=True,
     )
 
 
-@bot.command(name="일시정지")
-async def pause_drops(ctx: commands.Context):
-    if not await bot.require_admin(ctx):
+@bot.tree.command(name="일시정지", description="코드 드랍을 일시정지합니다. 기록 조회는 계속됩니다.")
+async def pause_drops(interaction: discord.Interaction):
+    if not await bot.require_admin(interaction):
         return
     bot.paused = True
     bot.database.set_setting("paused", 1)
-    await ctx.reply("코드 드랍을 일시정지했습니다. 기록 조회는 계속됩니다.", mention_author=False)
+    await interaction.response.send_message(
+        "코드 드랍을 일시정지했습니다. 기록 조회는 계속됩니다.",
+        ephemeral=True,
+    )
 
 
-@bot.command(name="재개")
-async def resume_drops(ctx: commands.Context):
-    if not await bot.require_admin(ctx):
+@bot.tree.command(name="재개", description="일시정지된 코드 드랍을 다시 시작합니다.")
+async def resume_drops(interaction: discord.Interaction):
+    if not await bot.require_admin(interaction):
         return
     bot.paused = False
     bot.database.set_setting("paused", 0)
-    await ctx.reply("코드 드랍을 재개했습니다.", mention_author=False)
+    await interaction.response.send_message("코드 드랍을 재개했습니다.", ephemeral=True)
 
 
-@bot.command(name="테스트")
-async def test_drop(ctx: commands.Context):
-    if not await bot.require_admin(ctx):
+@bot.tree.command(name="테스트", description="코드 패널 미리보기를 현재 채널에 전송합니다.")
+async def test_drop(interaction: discord.Interaction):
+    if not await bot.require_admin(interaction):
         return
     post = {
         "id": 0,
@@ -1239,21 +1285,23 @@ async def test_drop(ctx: commands.Context):
         "link": "https://example.com/benefits",
         "url": "https://t.me/shuffleboost/0",
     }
-    await ctx.send(view=CodePanelView(bot, post))
+    await interaction.response.send_message(
+        view=CodePanelView(bot, post),
+        ephemeral=True,
+    )
 
 
-@bot.event
-async def on_command_error(ctx: commands.Context, error: commands.CommandError):
-    if isinstance(error, commands.CommandNotFound):
-        return
-    if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.reply("명령어 인수가 부족합니다. `!도움말`을 확인해 주세요.", mention_author=False)
-        return
-    if isinstance(error, commands.BadArgument):
-        await ctx.reply("인수 형식이 올바르지 않습니다.", mention_author=False)
-        return
-    log.exception("명령어 처리 오류", exc_info=error)
-    await ctx.reply("명령어 처리 중 오류가 발생했습니다.", mention_author=False)
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: discord.app_commands.AppCommandError,
+):
+    log.error("슬래시 명령어 처리 오류", exc_info=error)
+    message = "명령어 처리 중 오류가 발생했습니다."
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
 
 
 def main() -> None:
