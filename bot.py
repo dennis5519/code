@@ -27,6 +27,8 @@ POLL_CATCHUP_MAX_PAGES = max(2, int(os.getenv("POLL_CATCHUP_MAX_PAGES", "20")))
 FORUM_CODE_RECOVERY_POSTS = 5
 FORUM_RESPONSE_MAX_BYTES = 1_048_576
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "shufflebot.sqlite3"))
+STREAM_STATUS_TEXT = os.getenv("STREAM_STATUS_TEXT", "> yubin12 코드로 방송중 <")
+STREAM_STATUS_URL = os.getenv("STREAM_STATUS_URL", "https://www.twitch.tv/yubin12")
 ADMIN_IDS = {
     int(user_id.strip())
     for user_id in os.getenv("ADMIN_IDS", "").split(",")
@@ -1087,6 +1089,12 @@ bot = ShuffleBot()
 
 @bot.event
 async def on_ready():
+    await bot.change_presence(
+        activity=discord.Streaming(
+            name=STREAM_STATUS_TEXT,
+            url=STREAM_STATUS_URL,
+        )
+    )
     log.info("Discord 연결 완료: %s (%s)", bot.user, bot.user.id if bot.user else "unknown")
 
 

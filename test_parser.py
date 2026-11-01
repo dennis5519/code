@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
+import discord
+
 from bot import (
     BACKFILL_MAX_PAGES,
     Database,
@@ -12,6 +14,7 @@ from bot import (
     ShuffleBot,
     calculate_backoff_seconds,
     extract_landing_page_code,
+    on_ready as bot_on_ready,
     parse_posts,
 )
 
@@ -88,6 +91,18 @@ class BrowserRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(code, "P2GGWZAM")
         client.forum_page.goto.assert_awaited_once()
+
+
+class PresenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ready_sets_custom_streaming_presence(self):
+        with patch("bot.bot.change_presence", new_callable=AsyncMock) as change_presence:
+            await bot_on_ready()
+
+        change_presence.assert_awaited_once()
+        activity = change_presence.await_args.kwargs["activity"]
+        self.assertIsInstance(activity, discord.Streaming)
+        self.assertEqual(activity.name, "> yubin12 코드로 방송중 <")
+        self.assertEqual(activity.url, "https://www.twitch.tv/yubin12")
 
 
 class ReliabilityTests(unittest.IsolatedAsyncioTestCase):

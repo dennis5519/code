@@ -46,6 +46,8 @@ python bot.py
 - `BACKFILL_MAX_PAGES`: 시작 시 백필 페이지 수 (기본 10)
 - `POLL_CATCHUP_MAX_PAGES`: 중단 후 새 글 따라잡기 최대 페이지 수 (기본 20)
 - `DATABASE_PATH`: SQLite 파일 경로 (기본 `shufflebot.sqlite3`)
+- `STREAM_STATUS_TEXT`: Discord 스트리밍 상태 문구 (기본 `> yubin12 코드로 방송중 <`)
+- `STREAM_STATUS_URL`: 스트리밍 상태를 눌렀을 때 열 주소 (기본 `https://www.twitch.tv/yubin12`)
 
 ## 명령어
 
