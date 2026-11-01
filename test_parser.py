@@ -18,7 +18,9 @@ from bot import (
     calculate_backoff_seconds,
     extract_landing_page_code,
     on_ready as bot_on_ready,
+    on_app_command_error,
     parse_posts,
+    post_latest_panel,
 )
 
 
@@ -154,7 +156,7 @@ class PresenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activity.url, "https://www.twitch.tv/yubin12")
 
 
-class SlashCommandTests(unittest.TestCase):
+class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
     def test_all_commands_are_registered_in_the_application_command_tree(self):
         names = {command.name for command in discord_bot.tree.get_commands()}
 
@@ -182,6 +184,58 @@ class SlashCommandTests(unittest.TestCase):
             {parameter.name for parameter in command.parameters},
             {"role", "create"},
         )
+
+    async def test_panel_command_defers_before_updating_the_panel(self):
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+            guild=SimpleNamespace(get_role=Mock(return_value=None)),
+            channel=SimpleNamespace(id=12, mention="#codes", guild=SimpleNamespace()),
+        )
+        database = SimpleNamespace(
+            latest_codes=Mock(
+                return_value=[
+                    {
+                        "post_id": 88,
+                        "code": "AB12CD34",
+                        "posted_at": None,
+                    }
+                ]
+            ),
+            get_setting=Mock(return_value=None),
+        )
+
+        with patch("bot.bot.require_admin", new_callable=AsyncMock, return_value=True):
+            with patch("bot.bot.database", database):
+                with patch("bot.bot.update_panel_message", new_callable=AsyncMock) as update_panel:
+                    async def assert_deferred(*args):
+                        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+
+                    update_panel.side_effect = assert_deferred
+                    await post_latest_panel.callback(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
+
+    async def test_interaction_expiry_during_error_reply_does_not_raise(self):
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(is_done=Mock(return_value=True)),
+            followup=SimpleNamespace(
+                send=AsyncMock(
+                    side_effect=discord.NotFound(
+                        Mock(),
+                        {"code": 10062, "message": "Unknown interaction"},
+                    )
+                )
+            ),
+        )
+
+        await on_app_command_error(
+            interaction,
+            discord.app_commands.AppCommandError("command failed"),
+        )
+
+        interaction.followup.send.assert_awaited_once()
 
 
 class ReliabilityTests(unittest.IsolatedAsyncioTestCase):

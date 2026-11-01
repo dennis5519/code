@@ -1163,15 +1163,16 @@ async def set_channel(interaction: discord.Interaction):
 async def post_latest_panel(interaction: discord.Interaction):
     if not await bot.require_admin(interaction):
         return
+    await interaction.response.defer(ephemeral=True)
     rows = bot.database.latest_codes(1)
     if not rows:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "저장된 코드가 없습니다. `/기록동기화`로 과거 기록을 먼저 가져와 주세요.",
             ephemeral=True,
         )
         return
     if interaction.guild is None or interaction.channel is None:
-        await interaction.response.send_message("서버 채널에서만 사용할 수 있습니다.", ephemeral=True)
+        await interaction.followup.send("서버 채널에서만 사용할 수 있습니다.", ephemeral=True)
         return
     post = dict(rows[0])
     post["id"] = post["post_id"]
@@ -1182,7 +1183,7 @@ async def post_latest_panel(interaction: discord.Interaction):
     role_id = bot.database.get_setting("alert_role_id")
     role = channel.guild.get_role(int(role_id)) if role_id and getattr(channel, "guild", None) else None
     await bot.update_panel_message(channel, post, role)
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"고정 코드 패널을 최신 코드로 갱신했습니다. ({channel.mention})",
         ephemeral=True,
     )
@@ -1322,10 +1323,13 @@ async def on_app_command_error(
 ):
     log.error("슬래시 명령어 처리 오류", exc_info=error)
     message = "명령어 처리 중 오류가 발생했습니다."
-    if interaction.response.is_done():
-        await interaction.followup.send(message, ephemeral=True)
-    else:
-        await interaction.response.send_message(message, ephemeral=True)
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        log.exception("슬래시 명령어 오류 응답을 Discord에 전달하지 못했습니다.")
 
 
 def main() -> None:
