@@ -11,6 +11,8 @@ from playwright.async_api import Error as PlaywrightError
 
 from bot import (
     BACKFILL_MAX_PAGES,
+    CodePanelView,
+    CodeView,
     Database,
     POLL_INTERVAL_SECONDS,
     ShuffleBot,
@@ -215,6 +217,55 @@ class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
                     await post_latest_panel.callback(interaction)
 
         interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
+
+    async def test_history_buttons_defer_before_database_lookup(self):
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        database = SimpleNamespace(
+            latest_codes=Mock(
+                side_effect=lambda count: (
+                    self.assertEqual(interaction.response.defer.await_count, 1),
+                    [],
+                )[1]
+            )
+        )
+        client = SimpleNamespace(database=database)
+        panel_view = CodePanelView(client, {"id": 1, "code": "AB12CD34"})
+        legacy_view = CodeView(client)
+
+        await panel_view.show_history(interaction)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        interaction.followup.send.assert_awaited_once()
+
+        interaction.response.defer.reset_mock()
+        interaction.followup.send.reset_mock()
+        await legacy_view.show_history.callback(interaction)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        interaction.followup.send.assert_awaited_once()
+
+    async def test_preferences_button_defers_before_database_lookup(self):
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+            user=SimpleNamespace(id=42),
+        )
+        database = SimpleNamespace(
+            preference=Mock(
+                side_effect=lambda user_id: (
+                    self.assertEqual(interaction.response.defer.await_count, 1),
+                    {"dm_enabled": False, "min_bonus": 0},
+                )[1]
+            ),
+            get_setting=Mock(return_value=None),
+        )
+        panel_view = CodePanelView(SimpleNamespace(database=database), {"id": 1, "code": "AB12CD34"})
+
+        await panel_view.show_preferences(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
         interaction.followup.send.assert_awaited_once()
 
     async def test_interaction_expiry_during_error_reply_does_not_raise(self):

@@ -379,6 +379,7 @@ class CodeView(discord.ui.View):
 
     @discord.ui.button(label="코드 복사", style=discord.ButtonStyle.success, custom_id="shuffle:copy")
     async def copy_code(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         post_id = getattr(interaction.message, "_shuffle_post_id", None)
         if post_id is None and interaction.message and interaction.message.embeds:
             footer = interaction.message.embeds[0].footer.text or ""
@@ -393,21 +394,23 @@ class CodeView(discord.ui.View):
                     code = match.group(1) if match else None
                     break
         if not code:
-            await interaction.response.send_message("이 버튼의 코드 기록을 찾을 수 없습니다.", ephemeral=True)
+            await interaction.followup.send("이 버튼의 코드 기록을 찾을 수 없습니다.", ephemeral=True)
             return
-        await interaction.response.send_message(f"```\n{code}\n```", ephemeral=True)
+        await interaction.followup.send(f"```\n{code}\n```", ephemeral=True)
 
     @discord.ui.button(label="지난 코드", style=discord.ButtonStyle.secondary, custom_id="shuffle:history")
     async def show_history(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         rows = self.bot.database.latest_codes(10)
         embed = discord.Embed(title="최근 보너스 코드", color=0x95A5A6)
         embed.description = "\n\n".join(format_code_row(row) for row in rows) or "저장된 코드가 없습니다."
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="내 알림 설정", style=discord.ButtonStyle.primary, custom_id="shuffle:preferences")
     async def show_preferences(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         view = PreferenceView(self.bot)
-        await interaction.response.send_message(view.status_text(interaction.user), view=view, ephemeral=True)
+        await interaction.followup.send(view.status_text(interaction.user), view=view, ephemeral=True)
 
 
 class CopyCodeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"shuffle:v2:copy:(?P<post_id>\d+):(?P<code>[A-Z0-9]{8})"):
@@ -493,14 +496,16 @@ class CodePanelView(discord.ui.LayoutView):
         )
 
     async def show_history(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         rows = self.bot.database.latest_codes(10)
         embed = discord.Embed(title="최근 보너스 코드", color=0x95A5A6)
         embed.description = "\n\n".join(format_code_row(row) for row in rows) or "저장된 코드가 없습니다."
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def show_preferences(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         view = PreferenceView(self.bot)
-        await interaction.response.send_message(view.status_text(interaction.user), view=view, ephemeral=True)
+        await interaction.followup.send(view.status_text(interaction.user), view=view, ephemeral=True)
 
 
 class PreferenceView(discord.ui.View):
@@ -526,13 +531,14 @@ class PreferenceView(discord.ui.View):
 
     @discord.ui.button(label="역할 알림 ON/OFF", style=discord.ButtonStyle.secondary, custom_id="shuffle:prefs:role")
     async def toggle_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
         role_id = self.bot.database.get_setting("alert_role_id")
         if not interaction.guild or not role_id:
-            await interaction.response.edit_message(content="서버 또는 알림 역할이 설정되지 않았습니다.", view=self)
+            await interaction.edit_original_response(content="서버 또는 알림 역할이 설정되지 않았습니다.", view=self)
             return
         role = interaction.guild.get_role(int(role_id))
         if role is None:
-            await interaction.response.edit_message(content="알림 역할을 찾을 수 없습니다. 관리자에게 확인해 주세요.", view=self)
+            await interaction.edit_original_response(content="알림 역할을 찾을 수 없습니다. 관리자에게 확인해 주세요.", view=self)
             return
         member = interaction.user
         if not isinstance(member, discord.Member):
@@ -549,33 +555,34 @@ class PreferenceView(discord.ui.View):
                 result = "역할 알림을 켰습니다."
         except discord.Forbidden:
             result = "역할을 변경할 권한이 없습니다. 봇 역할 위치와 권한을 확인해 주세요."
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"{result}\n{self.status_text(interaction.user, role_enabled)}",
             view=self,
         )
 
     @discord.ui.button(label="DM 알림 ON/OFF", style=discord.ButtonStyle.secondary, custom_id="shuffle:prefs:dm")
     async def toggle_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
         preference = self.bot.database.preference(interaction.user.id)
         enabled = 0 if preference["dm_enabled"] else 1
         if enabled:
             try:
                 await interaction.user.send("DM 코드 알림을 켰습니다. 새 코드가 등록되면 이곳으로 알려드릴게요.")
             except discord.Forbidden:
-                await interaction.response.edit_message(
+                await interaction.edit_original_response(
                     content="DM이 차단되어 알림을 켤 수 없습니다. 개인정보 설정에서 서버 멤버의 DM을 허용한 뒤 다시 시도해 주세요.\n"
                     + self.status_text(interaction.user),
                     view=self,
                 )
                 return
             except discord.HTTPException:
-                await interaction.response.edit_message(
+                await interaction.edit_original_response(
                     content="DM을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.\n" + self.status_text(interaction.user),
                     view=self,
                 )
                 return
         self.bot.database.save_preference(interaction.user.id, enabled, preference["min_bonus"])
-        await interaction.response.edit_message(content=self.status_text(interaction.user), view=self)
+        await interaction.edit_original_response(content=self.status_text(interaction.user), view=self)
 
     @discord.ui.select(
         placeholder="DM 최소 보너스 금액",
@@ -588,11 +595,12 @@ class PreferenceView(discord.ui.View):
         custom_id="shuffle:prefs:minimum",
     )
     async def select_minimum(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await interaction.response.defer()
         preference = self.bot.database.preference(interaction.user.id)
         self.bot.database.save_preference(
             interaction.user.id, preference["dm_enabled"], float(select.values[0])
         )
-        await interaction.response.edit_message(content=self.status_text(interaction.user), view=self)
+        await interaction.edit_original_response(content=self.status_text(interaction.user), view=self)
 
 
 class RecordPager(discord.ui.View):
