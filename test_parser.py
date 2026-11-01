@@ -1,4 +1,3 @@
-import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -7,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import discord
-from playwright.async_api import Error as PlaywrightError
 
 from bot import (
     BACKFILL_MAX_PAGES,
@@ -18,7 +16,6 @@ from bot import (
     ShuffleBot,
     bot as discord_bot,
     calculate_backoff_seconds,
-    extract_landing_page_code,
     on_ready as bot_on_ready,
     on_app_command_error,
     parse_posts,
@@ -68,83 +65,6 @@ class ParsePostsTests(unittest.TestCase):
     def test_ambiguous_multiple_codes_are_not_selected(self):
         html = SAMPLE_HTML.replace("AB12CD34", "AB12CD34<br>CD34EF56")
         self.assertIsNone(parse_posts(html)[0]["code"])
-
-    def test_extracts_date_matched_code_from_forum_page(self):
-        html = '<h4>30TH OCTOBER: "P2GGWZAM"</h4>'
-        posted_at = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
-
-        self.assertEqual(extract_landing_page_code(html, posted_at), "P2GGWZAM")
-
-
-class BrowserRecoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_fetches_date_matched_code_from_rendered_forum_page(self):
-        client = ShuffleBot()
-        article_locator = SimpleNamespace(first=SimpleNamespace(wait_for=AsyncMock()))
-        body_locator = SimpleNamespace(
-            inner_text=AsyncMock(return_value='30TH OCTOBER: "P2GGWZAM"')
-        )
-        client.forum_page = SimpleNamespace(
-            is_closed=Mock(return_value=False),
-            goto=AsyncMock(),
-            url="https://shufflecommunity.com/topic/example",
-            locator=Mock(side_effect=[article_locator, body_locator]),
-        )
-        client._ensure_forum_browser = AsyncMock()
-
-        code = await client.fetch_landing_code(
-            "https://shufflecommunity.com/topic/example",
-            datetime(2026, 10, 30, 12, tzinfo=timezone.utc),
-        )
-
-        self.assertEqual(code, "P2GGWZAM")
-        client.forum_page.goto.assert_awaited_once()
-
-    async def test_installs_only_headless_shell_when_linux_browser_is_missing(self):
-        client = ShuffleBot()
-        browser = SimpleNamespace(
-            is_connected=Mock(return_value=True),
-            new_context=AsyncMock(return_value=SimpleNamespace(new_page=AsyncMock())),
-        )
-        launch = AsyncMock(
-            side_effect=[PlaywrightError("Executable doesn't exist at /missing/chromium"), browser]
-        )
-        runtime = SimpleNamespace(chromium=SimpleNamespace(launch=launch))
-        client.forum_browser_runtime = runtime
-        process = SimpleNamespace(wait=AsyncMock(return_value=0))
-
-        with patch("bot.asyncio.create_subprocess_exec", new_callable=AsyncMock) as install:
-            install.return_value = process
-            with patch.object(ShuffleBot, "_guard_forum_navigation", new_callable=AsyncMock):
-                with patch("bot.sys.platform", "linux"):
-                    await client._ensure_forum_browser()
-
-        install.assert_awaited_once_with(
-            sys.executable,
-            "-m",
-            "playwright",
-            "install",
-            "chromium",
-            "--only-shell",
-        )
-        self.assertEqual(launch.await_args_list[0].kwargs, {"headless": True})
-        self.assertEqual(launch.await_args_list[1].kwargs, {"headless": True})
-
-    async def test_server_browser_launches_headless(self):
-        client = ShuffleBot()
-        browser = SimpleNamespace(
-            is_connected=Mock(return_value=True),
-            new_context=AsyncMock(return_value=SimpleNamespace(new_page=AsyncMock())),
-        )
-        runtime = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)))
-        client.forum_browser_runtime = runtime
-        client.forum_browser = None
-
-        with patch.object(ShuffleBot, "_guard_forum_navigation", new_callable=AsyncMock):
-            with patch("bot.sys.platform", "linux"):
-                await client._ensure_forum_browser()
-
-        runtime.chromium.launch.assert_awaited_once_with(headless=True)
-
 
 class PresenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_ready_sets_custom_streaming_presence(self):

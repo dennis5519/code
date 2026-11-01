@@ -3,8 +3,6 @@ import logging
 import os
 import re
 import sqlite3
-import sys
-import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -15,9 +13,6 @@ import discord
 from bs4 import BeautifulSoup
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from playwright.async_api import async_playwright
 
 load_dotenv()
 
@@ -25,8 +20,6 @@ TG_CHANNEL = os.getenv("TG_CHANNEL", "shuffleboost").strip().lstrip("@")
 POLL_INTERVAL_SECONDS = max(10, int(os.getenv("POLL_INTERVAL_SECONDS", "10")))
 BACKFILL_MAX_PAGES = max(1, int(os.getenv("BACKFILL_MAX_PAGES", "10")))
 POLL_CATCHUP_MAX_PAGES = max(2, int(os.getenv("POLL_CATCHUP_MAX_PAGES", "20")))
-FORUM_CODE_RECOVERY_POSTS = 5
-FORUM_RESPONSE_MAX_BYTES = 1_048_576
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "shufflebot.sqlite3"))
 STREAM_STATUS_TEXT = os.getenv("STREAM_STATUS_TEXT", "> yubin12 코드로 방송중 <")
 STREAM_STATUS_URL = os.getenv("STREAM_STATUS_URL", "https://www.twitch.tv/yubin12")
@@ -39,9 +32,6 @@ TELEGRAM_URL = f"https://t.me/s/{TG_CHANNEL}"
 KST = timezone(timedelta(hours=9))
 
 CODE_RE = re.compile(r"(?m)^\s*(?=[A-Z0-9]{8}\s*$)(?=.*[A-Z])(?=.*\d)[A-Z0-9]{8}\s*$")
-FORUM_CODE_LINE_RE = re.compile(
-    r"(?im)^\s*(?:#{1,6}\s*)?(\d{1,2})(?:ST|ND|RD|TH)\s+([A-Z]+)\s*:\s*[\"“]?([A-Z0-9]{8})[\"”]?\s*$"
-)
 BONUS_RE = re.compile(
     r"\$([\d,]+(?:\.\d{1,2})?)\s+for\s+the\s+first\s+([\d,]+)\s+users?\b.*?"
     r"\$([\d,]+(?:\.\d{1,2})?)\s+wager\s+requirement\s+past\s+([\d,]+)\s+days?",
@@ -110,41 +100,6 @@ def parse_posts(html: str, channel: str = TG_CHANNEL) -> list[dict]:
             }
         )
     return sorted(posts, key=lambda post: post["id"])
-
-
-def extract_landing_page_code(html: str, posted_at: datetime | None) -> str | None:
-    if posted_at is None:
-        return None
-    if posted_at.tzinfo is None:
-        posted_at = posted_at.replace(tzinfo=timezone.utc)
-    allowed_dates = {posted_at.date(), posted_at.astimezone(KST).date()}
-    month_numbers = {
-        "JANUARY": 1, "FEBRUARY": 2, "MARCH": 3, "APRIL": 4,
-        "MAY": 5, "JUNE": 6, "JULY": 7, "AUGUST": 8,
-        "SEPTEMBER": 9, "OCTOBER": 10, "NOVEMBER": 11, "DECEMBER": 12,
-    }
-    text = BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
-    candidates = set()
-    for day_text, month_text, code in FORUM_CODE_LINE_RE.findall(text):
-        if not re.fullmatch(r"[A-Z0-9]{8}", code):
-            continue
-        month = month_numbers.get(month_text.upper())
-        if month and any(date.month == month and date.day == int(day_text) for date in allowed_dates):
-            candidates.add(code)
-    return next(iter(candidates)) if len(candidates) == 1 else None
-
-
-def is_allowed_landing_url(url: str | None) -> bool:
-    if not url:
-        return False
-    parsed = urlparse(url)
-    hostname = (parsed.hostname or "").lower()
-    return (
-        parsed.scheme == "https"
-        and (hostname == "shufflecommunity.com" or hostname.endswith(".shufflecommunity.com"))
-        and parsed.username is None
-        and parsed.password is None
-    )
 
 
 class Database:
@@ -650,14 +605,6 @@ class ShuffleBot(commands.Bot):
         self.startup_backfill_task: asyncio.Task | None = None
         self.dm_queue: asyncio.Queue[dict] = asyncio.Queue()
         self.dm_workers: list[asyncio.Task] = []
-        self.landing_retry_at: dict[int, float] = {}
-        self.landing_failures: dict[int, int] = {}
-        self.forum_recovery_floor: int | None = None
-        self.forum_browser_runtime = None
-        self.forum_browser = None
-        self.forum_browser_context = None
-        self.forum_page = None
-        self.forum_browser_lock = asyncio.Lock()
 
     async def setup_hook(self):
         self.database = Database(DATABASE_PATH)
@@ -697,14 +644,10 @@ class ShuffleBot(commands.Bot):
             for worker in self.dm_workers:
                 worker.cancel()
             await asyncio.gather(*self.dm_workers, return_exceptions=True)
-        if self.session and not self.session.closed:
-            await self.session.close()
-        if self.forum_browser:
-            await self.forum_browser.close()
-        if self.forum_browser_runtime:
-            await self.forum_browser_runtime.stop()
-        if self.database:
-            self.database.close()
+            if self.session and not self.session.closed:
+                await self.session.close()
+            if self.database:
+                self.database.close()
         await super().close()
 
     async def fetch_page(self, before: int | None = None) -> list[dict]:
@@ -749,120 +692,6 @@ class ShuffleBot(commands.Bot):
                 return [collected[key] for key in sorted(collected)], False, oldest_id, newest_id
             posts = older_posts
         return [collected[key] for key in sorted(collected)], False, None, newest_id
-
-    async def fetch_landing_code(self, url: str, posted_at: datetime | None) -> str | None:
-        if not is_allowed_landing_url(url):
-            return None
-        async with self.forum_browser_lock:
-            try:
-                await self._ensure_forum_browser()
-                await self.forum_page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                if not is_allowed_landing_url(self.forum_page.url):
-                    log.warning("커뮤니티 페이지가 허용되지 않은 주소로 이동했습니다.")
-                    return None
-                await self.forum_page.locator("article").first.wait_for(
-                    state="attached",
-                    timeout=30000,
-                )
-                text = await self.forum_page.locator("body").inner_text(timeout=5000)
-                if len(text.encode("utf-8")) > FORUM_RESPONSE_MAX_BYTES:
-                    log.warning("커뮤니티 페이지가 크기 제한을 초과했습니다.")
-                    return None
-                return extract_landing_page_code(text, posted_at)
-            except PlaywrightTimeoutError as error:
-                log.info(
-                    "커뮤니티 글이 브라우저에 표시되지 않았습니다. "
-                    "보안 확인이 보이면 브라우저에서 직접 완료한 뒤 재시도합니다: %s",
-                    error,
-                )
-            except PlaywrightError as error:
-                log.warning("커뮤니티 브라우저 조회 실패: %s", error)
-            except RuntimeError as error:
-                log.warning("커뮤니티 Chromium 준비 실패: %s", error)
-            return None
-
-    async def _install_chromium(self, headless: bool) -> None:
-        log.info("Playwright Chromium이 없어 설치를 시작합니다.")
-        command = [sys.executable, "-m", "playwright", "install", "chromium"]
-        if headless:
-            command.append("--only-shell")
-        process = await asyncio.create_subprocess_exec(*command)
-        return_code = await process.wait()
-        if return_code != 0:
-            raise RuntimeError(f"Playwright Chromium 설치 명령이 종료 코드 {return_code}를 반환했습니다.")
-
-    async def _ensure_forum_browser(self) -> None:
-        if self.forum_page and not self.forum_page.is_closed():
-            return
-        if self.forum_browser_runtime is None:
-            self.forum_browser_runtime = await async_playwright().start()
-        if self.forum_browser is None or not self.forum_browser.is_connected():
-            headless = sys.platform.startswith("linux")
-            try:
-                self.forum_browser = await self.forum_browser_runtime.chromium.launch(
-                    headless=headless
-                )
-            except PlaywrightError as error:
-                if "Executable doesn't exist at" not in str(error):
-                    raise
-                await self._install_chromium(headless)
-                self.forum_browser = await self.forum_browser_runtime.chromium.launch(
-                    headless=headless
-                )
-            self.forum_browser_context = await self.forum_browser.new_context()
-        self.forum_page = await self.forum_browser_context.new_page()
-        await self.forum_page.route("**/*", self._guard_forum_navigation)
-
-    async def _guard_forum_navigation(self, route) -> None:
-        request = route.request
-        if (
-            request.is_navigation_request()
-            and request.frame == self.forum_page.main_frame
-            and not is_allowed_landing_url(request.url)
-        ):
-            log.warning("허용되지 않은 커뮤니티 페이지 이동을 차단했습니다: %s", request.url)
-            await route.abort()
-            return
-        await route.continue_()
-
-    async def resolve_recent_forum_codes(self, posts: list[dict], checkpoint: int) -> None:
-        recent_posts = sorted(posts, key=lambda post: post["id"])[-FORUM_CODE_RECOVERY_POSTS:]
-        for post in recent_posts:
-            post_id = int(post["id"])
-            if post.get("code") or not is_allowed_landing_url(post.get("link")):
-                continue
-            if post_id <= checkpoint and (
-                self.forum_recovery_floor is None or post_id < self.forum_recovery_floor
-            ):
-                continue
-            stored = self.database.get_code(post_id)
-            if stored is None:
-                if time.monotonic() < self.landing_retry_at.get(post_id, 0):
-                    continue
-                code = await self.fetch_landing_code(post["link"], post.get("posted_at"))
-                if code is None:
-                    failures = self.landing_failures.get(post_id, 0) + 1
-                    self.landing_failures[post_id] = failures
-                    self.landing_retry_at[post_id] = time.monotonic() + min(10 * (2 ** min(failures - 1, 5)), 300)
-                    continue
-                resolved_post = dict(post, code=code)
-                self.database.save_post(resolved_post)
-                self.landing_failures.pop(post_id, None)
-                self.landing_retry_at.pop(post_id, None)
-                stored = self.database.get_code(post_id)
-                log.info("Telegram 링크 페이지에서 코드 확인: post=%s", post_id)
-
-            if stored and not stored["sent_at"] and post_id <= checkpoint and not self.paused:
-                resolved_post = dict(stored)
-                resolved_post.update(
-                    id=post_id,
-                    link=stored["benefit_url"],
-                    url=stored["post_url"],
-                )
-                try:
-                    await self.send_code(resolved_post)
-                except (discord.HTTPException, RuntimeError) as error:
-                    log.warning("복구된 post %s 전송 대기: %s", post_id, error)
 
     async def deliver_ready_catchup(self, last_post_id: int, through_post_id: int) -> bool:
         for row in self.database.pending_codes_after(last_post_id, through_post_id):
@@ -1024,7 +853,6 @@ class ShuffleBot(commands.Bot):
                 log.info("DM 전송 실패 user=%s: %s", row["user_id"], error)
 
     async def bootstrap(self):
-        previous_checkpoint = self.database.get_setting("last_post_id")
         try:
             posts = await self.fetch_page()
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
@@ -1035,10 +863,6 @@ class ShuffleBot(commands.Bot):
             newest = posts[-1]["id"]
             self.database.set_setting("last_post_id", newest)
             log.info("최초 실행 기준점 설정: post=%s (기존 글은 드랍하지 않음)", newest)
-        elif previous_checkpoint is not None:
-            self.forum_recovery_floor = max(
-                0, int(previous_checkpoint) - FORUM_CODE_RECOVERY_POSTS + 1
-            )
         self.startup_backfill_task = asyncio.create_task(
             self.backfill(BACKFILL_MAX_PAGES), name="telegram-startup-backfill"
         )
@@ -1057,7 +881,6 @@ class ShuffleBot(commands.Bot):
 
             last_id = int(last_id_text)
             latest_page = await self.fetch_page()
-            await self.resolve_recent_forum_codes(latest_page, last_id)
             ready_text = self.database.get_setting("catchup_ready_until")
             if ready_text is not None:
                 await self.deliver_ready_catchup(last_id, int(ready_text))
