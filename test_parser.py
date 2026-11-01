@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import discord
+from playwright.async_api import Error as PlaywrightError
 
 from bot import (
     BACKFILL_MAX_PAGES,
@@ -94,17 +95,24 @@ class BrowserRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code, "P2GGWZAM")
         client.forum_page.goto.assert_awaited_once()
 
-    async def test_installs_chromium_when_playwright_executable_is_missing(self):
+    async def test_installs_only_headless_shell_when_linux_browser_is_missing(self):
         client = ShuffleBot()
-        executable_path = Path("missing-chromium")
-        runtime = SimpleNamespace(chromium=SimpleNamespace(executable_path=str(executable_path)))
+        browser = SimpleNamespace(
+            is_connected=Mock(return_value=True),
+            new_context=AsyncMock(return_value=SimpleNamespace(new_page=AsyncMock())),
+        )
+        launch = AsyncMock(
+            side_effect=[PlaywrightError("Executable doesn't exist at /missing/chromium"), browser]
+        )
+        runtime = SimpleNamespace(chromium=SimpleNamespace(launch=launch))
+        client.forum_browser_runtime = runtime
         process = SimpleNamespace(wait=AsyncMock(return_value=0))
 
         with patch("bot.asyncio.create_subprocess_exec", new_callable=AsyncMock) as install:
             install.return_value = process
-            with patch.object(Path, "is_file", side_effect=[False, True]):
-                client.forum_browser_runtime = runtime
-                await client._ensure_chromium_installed()
+            with patch.object(ShuffleBot, "_guard_forum_navigation", new_callable=AsyncMock):
+                with patch("bot.sys.platform", "linux"):
+                    await client._ensure_forum_browser()
 
         install.assert_awaited_once_with(
             sys.executable,
@@ -112,7 +120,10 @@ class BrowserRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "playwright",
             "install",
             "chromium",
+            "--only-shell",
         )
+        self.assertEqual(launch.await_args_list[0].kwargs, {"headless": True})
+        self.assertEqual(launch.await_args_list[1].kwargs, {"headless": True})
 
     async def test_server_browser_launches_headless(self):
         client = ShuffleBot()
@@ -120,15 +131,13 @@ class BrowserRecoveryTests(unittest.IsolatedAsyncioTestCase):
             is_connected=Mock(return_value=True),
             new_context=AsyncMock(return_value=SimpleNamespace(new_page=AsyncMock())),
         )
-        runtime = SimpleNamespace(chromium=SimpleNamespace(executable_path="installed"))
+        runtime = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)))
         client.forum_browser_runtime = runtime
         client.forum_browser = None
 
-        with patch.object(ShuffleBot, "_ensure_chromium_installed", new_callable=AsyncMock):
-            runtime.chromium.launch = AsyncMock(return_value=browser)
-            with patch.object(ShuffleBot, "_guard_forum_navigation", new_callable=AsyncMock):
-                with patch("bot.sys.platform", "linux"):
-                    await client._ensure_forum_browser()
+        with patch.object(ShuffleBot, "_guard_forum_navigation", new_callable=AsyncMock):
+            with patch("bot.sys.platform", "linux"):
+                await client._ensure_forum_browser()
 
         runtime.chromium.launch.assert_awaited_once_with(headless=True)
 
